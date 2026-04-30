@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import re
@@ -35,6 +36,7 @@ def _get_llm() -> ChatOllama:
         model       = settings.OLLAMA_MODEL,
         base_url    = settings.OLLAMA_BASE_URL,
         temperature = 0,
+        reasoning   = False
     )
     return _llm
 
@@ -83,11 +85,11 @@ def _unwrap_tool_reply(raw) -> str:
     return str(raw)
 
 
-async def _get_mcp_tools(server_key: str, url: str) -> list:
+async def _get_mcp_tools(server_key: str, url: str, timeout: float = 10.0) -> list:
     client = MultiServerMCPClient({
         server_key: {"url": url, "transport": "streamable_http"}
     })
-    tools = await client.get_tools()
+    tools = await asyncio.wait_for(client.get_tools(), timeout=timeout)
     logger.info(f"Loaded {len(tools)} tool(s) from {server_key}: {[t.name for t in tools]}")
     return tools
 
@@ -175,7 +177,7 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
             ),
         )
 
-        result   = await extractor.ainvoke({
+        result   = await asyncio.wait_for(extractor.ainvoke({
             "messages": [
                 HumanMessage(content=[
                     {
@@ -185,7 +187,7 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
                     {"type": "text", "text": 'Reply with ONLY valid JSON: {"license_plate": "...", "vehicle_type": "..."}'},
                 ])
             ]
-        })
+        }), timeout=30.0)
 
         messages = result.get("messages", [])
         raw      = messages[-1].content if messages else ""
