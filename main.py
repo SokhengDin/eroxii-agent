@@ -16,10 +16,10 @@ async def _run_alpr_mcp():
     await mcp.run_async(transport="streamable-http", host="0.0.0.0", port=8003)
 
 
-async def _run_ocr_mcp():
-    from app.mcp.ocr_server import run_server
-    logger.info("Starting OCR MCP server on :8001")
-    await asyncio.get_event_loop().run_in_executor(None, run_server)
+# async def _run_ocr_mcp():
+#     from app.mcp.ocr_server import run_server
+#     logger.info("Starting OCR MCP server on :8001")
+#     await asyncio.get_event_loop().run_in_executor(None, run_server)
 
 
 @asynccontextmanager
@@ -33,8 +33,8 @@ async def lifespan(app: FastAPI):
     alpr_mcp_task = asyncio.create_task(_run_alpr_mcp())
     logger.info("ALPR MCP server task started")
 
-    ocr_mcp_task = asyncio.create_task(_run_ocr_mcp())
-    logger.info("OCR MCP server task started")
+    # ocr_mcp_task = asyncio.create_task(_run_ocr_mcp())
+    # logger.info("OCR MCP server task started")
 
     telegram_app = build_telegram_app()
     await telegram_app.initialize()
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     await telegram_app.stop()
     await telegram_app.shutdown()
     alpr_mcp_task.cancel()
-    ocr_mcp_task.cancel()
+    # ocr_mcp_task.cancel()
     logger.info("Shutting down ...")
 
 

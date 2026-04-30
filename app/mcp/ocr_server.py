@@ -13,7 +13,7 @@ _model     = None
 _processor = None
 _device    = None
 
-MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5"
+MODEL_ID     = "PaddlePaddle/PaddleOCR-VL-1.5"
 
 TASK_PROMPTS = {
     "ocr"     : "OCR:",
@@ -52,11 +52,11 @@ def ocr_image(image_base64: str, task: Optional[str] = "ocr") -> dict:
     load_model()
 
     image_bytes = base64.b64decode(image_base64)
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image       = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-    task = task if task in TASK_PROMPTS else "ocr"
+    task        = task if task in TASK_PROMPTS else "ocr"
 
-    messages = [
+    messages    = [
         {
             "role": "user",
             "content": [
