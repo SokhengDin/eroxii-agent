@@ -47,7 +47,7 @@ async def _handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file        = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
 
-    await update.message.reply_text("Analyzing image...", message_thread_id=thread_id)
+    # await update.message.reply_text("Analyzing image...", message_thread_id=thread_id)
 
     try:
         response = await process_vehicle_image(image_bytes, chat_id)
