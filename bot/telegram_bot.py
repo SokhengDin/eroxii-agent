@@ -1,3 +1,4 @@
+import asyncio
 import traceback
 
 from telegram import Update
@@ -16,13 +17,29 @@ def _is_allowed(chat_id: int, thread_id: int | None) -> bool:
     return True
 
 
+def _user_msg(e: BaseException) -> str:
+    if isinstance(e, asyncio.TimeoutError):
+        return "Request timed out. Please try again."
+    return "An error occurred. Please try again."
+
+
 def _log_exc(e: BaseException, label: str):
     if isinstance(e, ExceptionGroup):
         for sub in e.exceptions:
             _log_exc(sub, label)
     else:
         logger.error(f"{label}: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
+        logger.debug(traceback.format_exc())
+
+
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"PTB unhandled error: {context.error}")
+    logger.debug(traceback.format_exc())
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("An error occurred. Please try again.")
+        except Exception:
+            pass
 
 
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,14 +64,12 @@ async def _handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file        = await context.bot.get_file(photo.file_id)
     image_bytes = bytes(await file.download_as_bytearray())
 
-    # await update.message.reply_text("Analyzing image...", message_thread_id=thread_id)
-
     try:
         response = await process_vehicle_image(image_bytes, chat_id)
         await update.message.reply_text(response, message_thread_id=thread_id, parse_mode='HTML')
-    except* Exception as eg:
-        _log_exc(eg, "Photo handler error")
-        await update.message.reply_text("Failed to process the image.", message_thread_id=thread_id)
+    except Exception as e:
+        _log_exc(e, "Photo handler error")
+        await update.message.reply_text(_user_msg(e), message_thread_id=thread_id)
 
 
 async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -68,9 +83,9 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = await process_text_message(update.message.text, chat_id)
         await update.message.reply_text(response, message_thread_id=thread_id, parse_mode='HTML')
-    except* Exception as eg:
-        _log_exc(eg, "Text handler error")
-        await update.message.reply_text("Failed to process your message.", message_thread_id=thread_id)
+    except Exception as e:
+        _log_exc(e, "Text handler error")
+        await update.message.reply_text(_user_msg(e), message_thread_id=thread_id)
 
 
 def build_telegram_app() -> Application:
@@ -82,4 +97,5 @@ def build_telegram_app() -> Application:
     app.add_handler(CommandHandler("start", _cmd_start))
     app.add_handler(MessageHandler(filters.PHOTO, _handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text))
+    app.add_error_handler(_error_handler)
     return app
