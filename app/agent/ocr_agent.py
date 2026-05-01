@@ -19,12 +19,42 @@ from app.core.config import settings
 from app.core.logger import logger
 
 _llm: ChatOllama | None = None
-_checkpointer    = InMemorySaver()
-_agent           = None
+_checkpointer           = InMemorySaver()
+_agent                  = None
 
 TOKEN_LIMIT = 100000
-
 _PLATE_RE   = re.compile(r'\b([A-Z]{1,3}[\s-]?\d{4,6}|\d{4,6}[A-Z]{0,2})\b')
+
+_SYSTEM_PROMPT = (
+    "You are Rex, eRoxii's sharp and friendly parking assistant. "
+    "You are helpful, concise, and occasionally witty — but always professional. "
+    "When a plate is found, present the info clearly. When it's not found, say so directly. "
+    "You remember the conversation and can answer follow-up questions.\n\n"
+    "TOOLS:\n"
+    "- search_member_by_plate(license_plate): Member info + subscription for an exact plate.\n"
+    "- search_plate_full_info(search_term, limit): Search by plate OR name — full session + captures.\n"
+    "- search_parking_records(search_term, start_date, end_date, limit): Free-text search with optional ISO 8601 date range.\n"
+    "- get_latest_records(limit, vehicle_type): Recent records across all plates. vehicle_type: CAR, MOTORCYCLE, TRUCK, BUS, VAN.\n"
+    "- read_resource(uri): Read any resource by URI when the plate is already known.\n\n"
+    "RESOURCE URIs (pass to read_resource):\n"
+    "- alpr://member/{license_plate} — member + subscription info\n"
+    "- alpr://plate/{license_plate}/full-info — full user + vehicle + latest captures\n"
+    "- alpr://plate/{license_plate}/latest-detection — live detection with is_valid flag\n"
+    "- alpr://plate/{license_plate}/captures — entry/exit capture list\n"
+    "- alpr://plate/{license_plate}/session-history — parking session history\n"
+    "- alpr://latest-records — recent records across all plates\n\n"
+    "Decision guide:\n"
+    "- Exact plate, need member/subscription → read_resource('alpr://member/{plate}')\n"
+    "- Exact plate, need full session + photos → read_resource('alpr://plate/{plate}/full-info')\n"
+    "- Exact plate, need captures only → read_resource('alpr://plate/{plate}/captures')\n"
+    "- Exact plate, need session history → read_resource('alpr://plate/{plate}/session-history')\n"
+    "- Exact plate, need live status → read_resource('alpr://plate/{plate}/latest-detection')\n"
+    "- Name or partial plate → search_plate_full_info\n"
+    "- Date range query → search_parking_records\n"
+    "- Recent activity all plates → get_latest_records or read_resource('alpr://latest-records')\n\n"
+    "IMPORTANT: Reply in plain text only. No markdown, no bold, no bullets, no asterisks, no headers. "
+    "Copy tool results exactly as-is without rephrasing or summarizing."
+)
 
 
 def _get_llm() -> ChatOllama:
@@ -36,7 +66,7 @@ def _get_llm() -> ChatOllama:
         model       = settings.OLLAMA_MODEL,
         base_url    = settings.OLLAMA_BASE_URL,
         temperature = 0,
-        reasoning   = False
+        reasoning   = False,
     )
     return _llm
 
@@ -57,7 +87,6 @@ def _trim_on_token_limit(state: AgentState, runtime: Runtime) -> dict[str, Any] 
         return None
 
     logger.info(f"History {total} tokens > {TOKEN_LIMIT}, trimming...")
-
     keep = list(messages)
     while len(keep) > 1:
         try:
@@ -69,12 +98,7 @@ def _trim_on_token_limit(state: AgentState, runtime: Runtime) -> dict[str, Any] 
         keep.pop(1)
 
     logger.info(f"Trimmed to {len(keep)} messages")
-    return {
-        "messages": [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            *keep,
-        ]
-    }
+    return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *keep]}
 
 
 def _unwrap_tool_reply(raw) -> str:
@@ -85,26 +109,50 @@ def _unwrap_tool_reply(raw) -> str:
     return str(raw)
 
 
-async def _get_mcp_tools(server_key: str, url: str, timeout: float = 10.0) -> list:
-    client = MultiServerMCPClient({
-        server_key: {"url": url, "transport": "streamable_http"}
-    })
-    tools = await asyncio.wait_for(client.get_tools(), timeout=timeout)
-    logger.info(f"Loaded {len(tools)} tool(s) from {server_key}: {[t.name for t in tools]}")
+def _alpr_client_config() -> dict:
+    return {
+        "alpr": {
+            "url"      : settings.ALPR_MCP_URL,
+            "transport": "streamable_http",
+        }
+    }
+
+
+async def _load_alpr_tools(timeout: float = 10.0) -> list:
+    """Load ALPR tools via a fresh stateless client call."""
+    client = MultiServerMCPClient(_alpr_client_config())
+    tools  = await asyncio.wait_for(client.get_tools(), timeout=timeout)
+    logger.info(f"Loaded {len(tools)} ALPR tool(s): {[t.name for t in tools]}")
     return tools
 
 
+async def _get_agent(force_reload: bool = False):
+    global _agent
+    if _agent is not None and not force_reload:
+        return _agent
+    tools  = await _load_alpr_tools()
+    _agent = create_agent(
+        _get_llm(),
+        tools         = tools,
+        system_prompt = _SYSTEM_PROMPT,
+        middleware    = [_trim_on_token_limit],
+        checkpointer  = _checkpointer,
+    )
+    logger.info("Conversational ALPR agent created")
+    return _agent
+
+
 async def _ocr_fallback(b64: str) -> str | None:
-    """Call OCR MCP server, extract plate from raw text. Returns plate string or None."""
     logger.info("Falling back to OCR MCP server")
     try:
-        tools    = await _get_mcp_tools("ocr", settings.OCR_MCP_URL)
+        client   = MultiServerMCPClient({"ocr": {"url": settings.OCR_MCP_URL, "transport": "streamable_http"}})
+        tools    = await asyncio.wait_for(client.get_tools(), timeout=10.0)
         ocr_tool = next((t for t in tools if t.name == "ocr_image"), None)
         if ocr_tool is None:
             logger.warning("ocr_image tool not found on OCR MCP server")
             return None
 
-        raw = await ocr_tool.ainvoke({"image_base64": b64, "task": "ocr"})
+        raw  = await ocr_tool.ainvoke({"image_base64": b64, "task": "ocr"})
         text = _unwrap_tool_reply(raw)
         logger.info(f"OCR MCP raw text: {repr(text)}")
 
@@ -122,59 +170,17 @@ async def _ocr_fallback(b64: str) -> str | None:
 
 
 async def _search_plate(license_plate: str) -> str:
-    tools       = await _get_mcp_tools("alpr", settings.ALPR_MCP_URL)
-    search_tool = next((t for t in tools if t.name == "search_member_by_plate"), None)
-    if search_tool is None:
-        return "ALPR search tool unavailable."
-
-    raw_reply = await search_tool.ainvoke({"license_plate": license_plate})
-    logger.info(f"Search reply: {repr(raw_reply)}")
-    return _unwrap_tool_reply(raw_reply)
-
-
-async def _get_agent():
-    global _agent
-    if _agent is not None:
-        return _agent
-    tools  = await _get_mcp_tools("alpr", settings.ALPR_MCP_URL)
-    _agent = create_agent(
-        _get_llm(),
-        tools         = tools,
-        system_prompt = (
-            "You are Rex, eRoxii's sharp and friendly parking assistant. "
-            "You are helpful, concise, and occasionally witty — but always professional. "
-            "When a plate is found, present the info clearly. When it's not found, say so directly. "
-            "You remember the conversation and can answer follow-up questions.\n\n"
-            "You have TOOLS (call when user provides search input) and RESOURCES (read by URI for known plates).\n\n"
-            "TOOLS — use when constructing a search:\n"
-            "- search_member_by_plate(license_plate): Member info + subscription for an exact plate.\n"
-            "- search_plate_full_info(search_term, limit): Search by plate OR name — returns full session + captures.\n"
-            "- search_parking_records(search_term, start_date, end_date, limit): Free-text search with optional date range (ISO 8601).\n"
-            "- get_latest_records(limit, vehicle_type): Recent records across all plates, optional vehicle_type filter.\n\n"
-            "RESOURCES — read by URI when plate is already known:\n"
-            "- alpr://member/{license_plate} — member info\n"
-            "- alpr://plate/{license_plate}/full-info — full user + vehicle + captures\n"
-            "- alpr://plate/{license_plate}/latest-detection — live detection with is_valid flag\n"
-            "- alpr://plate/{license_plate}/captures — entry/exit capture images\n"
-            "- alpr://plate/{license_plate}/session-history — parking session history\n"
-            "- alpr://latest-records — recent records across all plates\n\n"
-            "Decision guide:\n"
-            "- Exact plate + member/subscription info → search_member_by_plate or alpr://member/{plate}\n"
-            "- Exact plate + full session + photos → alpr://plate/{plate}/full-info\n"
-            "- Name or partial plate → search_plate_full_info\n"
-            "- Capture images for known plate → alpr://plate/{plate}/captures\n"
-            "- Session history for known plate → alpr://plate/{plate}/session-history\n"
-            "- Live detection status → alpr://plate/{plate}/latest-detection\n"
-            "- Date range query → search_parking_records with start_date and end_date\n"
-            "- Recent activity all plates → get_latest_records or alpr://latest-records\n\n"
-            "IMPORTANT: Reply in plain text only. No markdown, no bold, no bullets, no asterisks, no headers. "
-            "Copy tool/resource results exactly as-is without rephrasing or summarizing."
-        ),
-        middleware    = [_trim_on_token_limit],
-        checkpointer  = _checkpointer,
-    )
-    logger.info("Conversational ALPR agent created")
-    return _agent
+    try:
+        tools       = await _load_alpr_tools()
+        search_tool = next((t for t in tools if t.name == "search_member_by_plate"), None)
+        if search_tool is None:
+            return "ALPR search tool unavailable."
+        raw_reply = await search_tool.ainvoke({"license_plate": license_plate})
+        logger.info(f"Search reply: {repr(raw_reply)}")
+        return _unwrap_tool_reply(raw_reply)
+    except Exception as e:
+        logger.error(f"_search_plate failed: {e}")
+        return f"Search failed: {e}"
 
 
 async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
@@ -198,17 +204,11 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
                 "DO NOT include any text outside the JSON object."
             ),
         )
-
-        result   = await asyncio.wait_for(extractor.ainvoke({
-            "messages": [
-                HumanMessage(content=[
-                    {
-                        "type"      : "image_url",
-                        "image_url" : {"url": f"data:image/jpeg;base64,{b64}"},
-                    },
-                    {"type": "text", "text": 'Reply with ONLY valid JSON: {"license_plate": "...", "vehicle_type": "..."}'},
-                ])
-            ]
+        result = await asyncio.wait_for(extractor.ainvoke({
+            "messages": [HumanMessage(content=[
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": 'Reply with ONLY valid JSON: {"license_plate": "...", "vehicle_type": "..."}'},
+            ])]
         }), timeout=30.0)
 
         messages = result.get("messages", [])
@@ -220,17 +220,33 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
             extracted     = json.loads(json_match.group())
             license_plate = extracted.get("license_plate", "").strip() or None
             logger.info(f"Qwen extracted plate={license_plate!r} type={extracted.get('vehicle_type')!r}")
-
     except Exception as e:
         logger.error(f"Qwen extraction failed: {e}")
 
-    # Step 2: fallback to OCR MCP if Qwen failed
+    # Step 2: OCR MCP fallback
     if not license_plate:
         logger.info("Qwen did not extract plate, trying OCR MCP fallback")
         license_plate = await _ocr_fallback(b64)
 
+    # Step 3: no plate — let agent freely describe the image
     if not license_plate:
-        return "No license plate detected in the image."
+        logger.info("No plate found, routing image to agent for free description")
+        try:
+            agent  = await _get_agent()
+            config: RunnableConfig = {"configurable": {"thread_id": str(chat_id)}}
+            result = await agent.ainvoke(
+                {"messages": [HumanMessage(content=[
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": "No license plate was detected in this image. Describe what you see freely and helpfully."},
+                ])]},
+                config,
+            )
+            return result["messages"][-1].content.strip()
+        except Exception as e:
+            logger.error(f"Free description failed: {e}")
+            # Reload agent with fresh tools on next call
+            await _get_agent(force_reload=True)
+            return "Could not analyze the image. Please try again."
 
     reply = await _search_plate(license_plate)
     return "<code>" + reply.strip() + "</code>"
@@ -238,12 +254,18 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
 
 async def process_text_message(text: str, chat_id: int) -> str:
     logger.info(f"process_text_message chat_id={chat_id}: {repr(text)}")
-    agent  = await _get_agent()
-    config: RunnableConfig = {"configurable": {"thread_id": str(chat_id)}}
-    result = await agent.ainvoke(
-        {"messages": [HumanMessage(content=text)]},
-        config,
-    )
-    reply = result["messages"][-1].content
-    logger.info(f"Reply: {repr(reply)}")
-    return "<code>" + reply.strip() + "</code>"
+    try:
+        agent  = await _get_agent()
+        config: RunnableConfig = {"configurable": {"thread_id": str(chat_id)}}
+        result = await agent.ainvoke(
+            {"messages": [HumanMessage(content=text)]},
+            config,
+        )
+        reply = result["messages"][-1].content
+        logger.info(f"Reply: {repr(reply)}")
+        return "<code>" + reply.strip() + "</code>"
+    except Exception as e:
+        logger.error(f"process_text_message failed: {e}")
+        # Force reload agent on next call in case tools are stale
+        await _get_agent(force_reload=True)
+        return "Something went wrong. Please try again."

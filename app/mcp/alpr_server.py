@@ -179,6 +179,38 @@ async def resource_latest_records() -> str:
     return "\n".join(lines).strip()
 
 
+# ── Resource bridge — lets agent read any resource by URI ─────────────────────
+
+@mcp.tool
+async def read_resource(uri: str) -> str:
+    """Read any ALPR resource by URI. Available URIs:
+    - alpr://member/{license_plate}
+    - alpr://plate/{license_plate}/full-info
+    - alpr://plate/{license_plate}/latest-detection
+    - alpr://plate/{license_plate}/captures
+    - alpr://plate/{license_plate}/session-history
+    - alpr://latest-records
+    """
+    logger.info(f"[ALPR tool] read_resource: {uri}")
+
+    import re as _re
+
+    if m := _re.fullmatch(r'alpr://member/(.+)', uri):
+        return await resource_member(m.group(1))
+    if m := _re.fullmatch(r'alpr://plate/(.+)/full-info', uri):
+        return await resource_plate_full_info(m.group(1))
+    if m := _re.fullmatch(r'alpr://plate/(.+)/latest-detection', uri):
+        return await resource_latest_detection(m.group(1))
+    if m := _re.fullmatch(r'alpr://plate/(.+)/captures', uri):
+        return await resource_captures(m.group(1))
+    if m := _re.fullmatch(r'alpr://plate/(.+)/session-history', uri):
+        return await resource_session_history(m.group(1))
+    if uri == 'alpr://latest-records':
+        return await resource_latest_records()
+
+    return f"Unknown resource URI: {uri}"
+
+
 # ── Tools — search actions where agent constructs the query ───────────────────
 
 @mcp.tool
