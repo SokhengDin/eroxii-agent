@@ -41,20 +41,20 @@ async def detect_license_plate(file: UploadFile = File(...)):
             tools         = [],
             system_prompt = (
                 "You are a vehicle license plate recognition assistant. "
-                "Analyze the image. It may be a raw vehicle photo or a parking ticket/receipt. "
-                "Your ONLY job is to extract the license plate number and vehicle type. "
-                "You MUST reply with ONLY this exact JSON structure and nothing else — no explanation, no markdown, no extra text:\n"
-                '{"license_plate": "ABC123", "vehicle_type": "CAR"}\n'
+                "Analyze the image carefully. It may be a vehicle photo or a parking ticket/receipt. "
+                "Read the actual characters on the license plate visible in the image. "
+                "Reply with ONLY a JSON object — no markdown, no code block, no explanation:\n"
+                '{"license_plate": "<actual plate text>", "vehicle_type": "<type>"}\n'
                 "vehicle_type must be one of: CAR, MOTORCYCLE, TRUCK, BUS, VAN, OTHER. "
-                "If you cannot find the license plate, use empty string. "
-                "DO NOT include any text outside the JSON object."
+                "NEVER use placeholder or example values — only real text read from the image. "
+                "If the plate is unreadable, use empty string."
             ),
         )
 
         result = await asyncio.wait_for(
             extractor.ainvoke({"messages": [HumanMessage(content=[
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                {"type": "text", "text": 'Reply with ONLY valid JSON: {"license_plate": "...", "vehicle_type": "..."}'},
+                {"type": "text", "text": "What is the license plate number shown in this image? Reply with ONLY JSON, no markdown."},
             ])]}),
             timeout=30.0,
         )
