@@ -215,7 +215,8 @@ async def process_vehicle_image(image_bytes: bytes, chat_id: int) -> str:
         raw      = messages[-1].content if messages else ""
         logger.info(f"Extractor output: {repr(raw)}")
 
-        json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
+        cleaned    = re.sub(r'^```[a-z]*\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE).strip()
+        json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
         if json_match:
             extracted     = json.loads(json_match.group())
             license_plate = extracted.get("license_plate", "").strip() or None
