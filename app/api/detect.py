@@ -41,7 +41,7 @@ _DETECTION_PROMPT = (
 )
 
 
-@router.post("/", response_model=DetectionResult)
+@router.post("", response_model=DetectionResult)
 async def detect_license_plate(file: UploadFile = File(...)):
     """
     Detect license plate from an uploaded image.
