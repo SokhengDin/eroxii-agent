@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.response_middleware import ResponseMiddleware
 from app.core.config import settings
+from app.api.detect import router as detect_router
 from bot.telegram_bot import build_telegram_app
 from app import logger
 
@@ -59,6 +60,7 @@ app = FastAPI(
     redoc_url = None if settings.ENV == "prod" else "/redoc",
 )
 
+app.include_router(detect_router)
 app.add_middleware(ResponseMiddleware)
 app.add_middleware(
     CORSMiddleware,
